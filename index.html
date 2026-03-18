@@ -1,217 +1,182 @@
-// Invoco Zip Browser - Application Logic
 
-const MAX_ZIP_SIZE = 100 * 1024 * 1024; // 100MB
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Invoco - Browse Presentation</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-// --- DOM refs ---
-const dropZone = document.getElementById('drop-zone');
-const fileInput = document.getElementById('file-input');
-const fileName = document.getElementById('file-name');
-const status = document.getElementById('status');
-const uploadView = document.getElementById('upload-view');
-const viewerView = document.getElementById('viewer-view');
-const viewerTitle = document.getElementById('viewer-title');
-const viewerFrame = document.getElementById('viewer-frame');
-const uploadNewBtn = document.getElementById('upload-new-btn');
-
-// --- Service Worker ---
-
-async function registerSW() {
-  if (!('serviceWorker' in navigator)) {
-    throw new Error('Service Workers are not supported in this browser. Use a modern browser over HTTPS or localhost.');
-  }
-  const reg = await navigator.serviceWorker.register('./sw.js');
-
-  // Wait for the SW to become active
-  const sw = reg.installing || reg.waiting || reg.active;
-  if (sw.state === 'activated') return reg;
-
-  return new Promise((resolve, reject) => {
-    sw.addEventListener('statechange', () => {
-      if (sw.state === 'activated') resolve(reg);
-    });
-    setTimeout(() => reject(new Error('Service Worker activation timed out')), 10000);
-  });
-}
-
-function sendToSW(type, data) {
-  return new Promise((resolve, reject) => {
-    const sw = navigator.serviceWorker.controller;
-    if (!sw) {
-      reject(new Error('Service Worker not active. Try refreshing the page.'));
-      return;
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f0f13;
+      color: #e0e0e6;
+      height: 100vh;
+      overflow: hidden;
     }
-    const channel = new MessageChannel();
-    channel.port1.onmessage = (event) => resolve(event.data);
-    setTimeout(() => reject(new Error('Service Worker did not respond')), 10000);
-    sw.postMessage({ type, data }, [channel.port2]);
-  });
-}
 
-// --- Zip Extraction ---
+    /* Upload View */
+    .view { display: none; }
+    .view.active { display: flex; }
 
-function stripCommonRoot(paths) {
-  if (paths.length === 0) return { prefix: '', stripped: paths };
+    #upload-view {
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      gap: 24px;
+    }
 
-  // Find common directory prefix
-  const parts = paths[0].split('/');
-  let prefixParts = 0;
+    .brand {
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      color: #fff;
+    }
 
-  if (parts.length > 1) {
-    const candidate = parts[0] + '/';
-    const allMatch = paths.every((p) => p.startsWith(candidate));
-    if (allMatch) prefixParts = 1;
-  }
+    .brand span {
+      color: #6c63ff;
+    }
 
-  if (prefixParts === 0) return { prefix: '', stripped: paths };
+    .upload-card {
+      background: #1a1a24;
+      border: 1px solid #2a2a3a;
+      border-radius: 16px;
+      padding: 48px 64px;
+      text-align: center;
+      max-width: 520px;
+      width: 90%;
+    }
 
-  const prefix = parts.slice(0, prefixParts).join('/') + '/';
-  const stripped = paths.map((p) => p.substring(prefix.length));
-  return { prefix, stripped };
-}
+    #drop-zone {
+      border: 2px dashed #3a3a4a;
+      border-radius: 12px;
+      padding: 48px 32px;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+    }
 
-function shouldSkip(path) {
-  const lower = path.toLowerCase();
-  if (lower.includes('__macosx/')) return true;
-  if (lower.endsWith('.ds_store')) return true;
-  if (lower.endsWith('/')) return true; // directories
-  return false;
-}
+    #drop-zone:hover,
+    #drop-zone.drag-over {
+      border-color: #6c63ff;
+      background: rgba(108, 99, 255, 0.06);
+    }
 
-async function extractZip(file) {
-  if (file.size > MAX_ZIP_SIZE) {
-    throw new Error(`File too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Maximum is 100MB.`);
-  }
+    .drop-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+      opacity: 0.5;
+    }
 
-  const arrayBuffer = await file.arrayBuffer();
+    .drop-label {
+      font-size: 16px;
+      color: #a0a0b0;
+      margin-bottom: 8px;
+    }
 
-  // JSZip is loaded globally from CDN
-  if (typeof JSZip === 'undefined') {
-    throw new Error('JSZip library failed to load. Check your internet connection.');
-  }
+    .drop-hint {
+      font-size: 13px;
+      color: #606070;
+    }
 
-  const zip = await JSZip.loadAsync(arrayBuffer);
-  const entries = Object.keys(zip.files).filter((p) => !shouldSkip(p));
+    #file-name {
+      margin-top: 12px;
+      font-size: 14px;
+      color: #8080a0;
+      min-height: 20px;
+    }
 
-  if (entries.length === 0) {
-    throw new Error('Zip file is empty or contains no usable files.');
-  }
+    .status {
+      font-size: 14px;
+      color: #8080a0;
+      min-height: 20px;
+    }
 
-  // Strip common root folder
-  const { prefix, stripped } = stripCommonRoot(entries);
+    .status.error {
+      color: #ff6b6b;
+    }
 
-  // Extract file contents as ArrayBuffers
-  const fileMap = {};
-  for (let i = 0; i < entries.length; i++) {
-    const originalPath = entries[i];
-    const strippedPath = stripped[i];
-    if (!strippedPath) continue; // skip if path becomes empty after stripping
-    const content = await zip.files[originalPath].async('arraybuffer');
-    fileMap[strippedPath] = content;
-  }
+    #file-input {
+      display: none;
+    }
 
-  if (!fileMap['index.html']) {
-    throw new Error('No index.html found in the zip. Invoco presentations require an index.html entry point.');
-  }
+    /* Viewer View */
+    #viewer-view {
+      flex-direction: column;
+      height: 100vh;
+    }
 
-  return { fileMap, prefix };
-}
+    .viewer-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      height: 44px;
+      min-height: 44px;
+      background: #16161e;
+      border-bottom: 1px solid #2a2a3a;
+    }
 
-// --- UI ---
+    #viewer-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #c0c0d0;
+    }
 
-function showStatus(msg, isError = false) {
-  status.textContent = msg;
-  status.className = 'status' + (isError ? ' error' : '');
-}
+    .btn {
+      background: #2a2a3e;
+      color: #c0c0d0;
+      border: 1px solid #3a3a4a;
+      border-radius: 6px;
+      padding: 6px 14px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
 
-function showUpload() {
-  uploadView.classList.add('active');
-  viewerView.classList.remove('active');
-  viewerFrame.src = 'about:blank';
-  fileName.textContent = '';
-  showStatus('');
-}
+    .btn:hover {
+      background: #3a3a52;
+    }
 
-function showViewer(title) {
-  uploadView.classList.remove('active');
-  viewerView.classList.add('active');
-  viewerTitle.textContent = title;
-  viewerFrame.src = '/browse/view/index.html';
-}
+    #viewer-frame {
+      flex: 1;
+      border: none;
+      width: 100%;
+      background: #fff;
+    }
+  </style>
+</head>
+<body>
 
-async function handleFile(file) {
-  if (!file) return;
-  if (!file.name.toLowerCase().endsWith('.zip')) {
-    showStatus('Please select a .zip file.', true);
-    return;
-  }
+  <!-- Upload View -->
+  <div id="upload-view" class="view active">
+    <div class="brand">invoco<span>.</span></div>
+    <div class="upload-card">
+      <div id="drop-zone">
+        <div class="drop-icon">&#128193;</div>
+        <div class="drop-label">Drop a zipped presentation here</div>
+        <div class="drop-hint">or click to browse (.zip)</div>
+      </div>
+      <div id="file-name"></div>
+      <input type="file" id="file-input" accept=".zip">
+    </div>
+    <div id="status" class="status"></div>
+  </div>
 
-  fileName.textContent = file.name;
-  showStatus('Extracting...');
+  <!-- Viewer View -->
+  <div id="viewer-view" class="view">
+    <div class="viewer-toolbar">
+      <span id="viewer-title"></span>
+      <button id="upload-new-btn" class="btn">Upload New</button>
+    </div>
+    <iframe id="viewer-frame" src="about:blank"></iframe>
+  </div>
 
-  try {
-    const { fileMap, prefix } = await extractZip(file);
-    showStatus(`Sending ${Object.keys(fileMap).length} files to viewer...`);
-
-    // Transfer files to SW. Convert ArrayBuffers to transferable.
-    // We send the map as a plain object; the SW will store them.
-    await sendToSW('LOAD_FILES', fileMap);
-
-    // Derive a display title from the zip name or stripped prefix
-    const title = prefix
-      ? formatTitle(prefix.replace(/\/$/, ''))
-      : formatTitle(file.name.replace(/\.zip$/i, ''));
-
-    showViewer(title);
-  } catch (err) {
-    showStatus(err.message, true);
-  }
-}
-
-function formatTitle(raw) {
-  // "01-corporate-blue" -> "Corporate Blue"
-  return raw
-    .replace(/^\d+-/, '')
-    .replace(/[-_]/g, ' ')
-    .replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-// --- Events ---
-
-dropZone.addEventListener('click', () => fileInput.click());
-
-fileInput.addEventListener('change', () => {
-  handleFile(fileInput.files[0]);
-  fileInput.value = ''; // reset so same file can be re-selected
-});
-
-dropZone.addEventListener('dragover', (e) => {
-  e.preventDefault();
-  dropZone.classList.add('drag-over');
-});
-
-dropZone.addEventListener('dragleave', () => {
-  dropZone.classList.remove('drag-over');
-});
-
-dropZone.addEventListener('drop', (e) => {
-  e.preventDefault();
-  dropZone.classList.remove('drag-over');
-  const file = e.dataTransfer.files[0];
-  handleFile(file);
-});
-
-uploadNewBtn.addEventListener('click', async () => {
-  await sendToSW('CLEAR_FILES');
-  showUpload();
-});
-
-// --- Init ---
-
-(async () => {
-  try {
-    await registerSW();
-    showStatus('Ready. Upload a zipped presentation.');
-  } catch (err) {
-    showStatus(err.message, true);
-  }
-})();
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"
+          integrity="sha512-XMVd28F1oH/O71fzwBnV7HucLxVwtxf26XV8P4wPk26EDxuGZ91N8bsOttmnomcCD3CS5ZMRL50H0GgOHvegtg=="
+          crossorigin="anonymous"
+          referrerpolicy="no-referrer"></script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
